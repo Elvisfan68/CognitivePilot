@@ -284,11 +284,36 @@ class BART:
             })
         
         return sequence
-    
+    def get_actual_screen_size(self):
+        """Get actual screen dimensions, correcting for macOS scaling issues"""
+        # Get what PsychoPy thinks the screen size is
+        psychopy_width = self.win.size[0]
+        psychopy_height = self.win.size[1]
+        
+        try:
+            import platform
+            if platform.system() == "Darwin":  # macOS
+                import subprocess
+                result = subprocess.run(['system_profiler', 'SPDisplaysDataType'], 
+                                      capture_output=True, text=True)
+                output = result.stdout
+                
+                import re
+                resolution_match = re.search(r'Resolution:\s*(\d+)\s*x\s*(\d+)', output)
+                
+                if resolution_match:
+                    actual_width = int(resolution_match.group(1))
+                    actual_height = int(resolution_match.group(2))
+                    print(f"Corrected screen size: {actual_width}x{actual_height} (was {psychopy_width}x{psychopy_height})")
+                    return actual_width, actual_height
+        except Exception as e:
+            print(f"Could not detect actual screen size: {e}")
+        
+        print(f"Using PsychoPy screen size: {psychopy_width}x{psychopy_height}")
+        return psychopy_width, psychopy_height
     def calculate_text_scaling(self):
         """Calculate text sizes based on screen dimensions"""
-        screen_width = self.win.size[0]
-        screen_height = self.win.size[1]
+        screen_width, screen_height = self.get_actual_screen_size()
         
         base_scale = 1.5
         scale_factor = (screen_height / 1080.0) * base_scale
@@ -333,8 +358,7 @@ class BART:
 
     def setup_display(self):
         """Setup all display elements with slider control and balloon preview"""
-        screen_width = self.win.size[0]
-        screen_height = self.win.size[1]
+        screen_width, screen_height = self.get_actual_screen_size()
         scale_factor = (screen_height / 1080.0) * 1.5
         
         # Button dimensions
