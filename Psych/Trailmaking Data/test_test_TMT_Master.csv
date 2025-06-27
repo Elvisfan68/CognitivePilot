@@ -1,0 +1,3 @@
+Participant_Treatment,Trial_Name,Connection,Reaction_Time_ms,Total_Time_ms,Wrong_Guesses_Before_Correct_One
+test_test,Familiarization_Numbers_Desc,Start-6,2367.4930999986827,2367.521999985911,1
+test_test,Familiarization_Numbers_Desc,6-5,1847.6073999190703,4314.539999933913,1

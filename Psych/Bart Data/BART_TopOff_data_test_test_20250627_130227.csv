@@ -1,0 +1,6 @@
+Timestamp,ID,Treatment,Trial,Explosion Point,Initial Pump,Top Off
+2025-06-27 13:01:42,test,test,1,76,69,0
+2025-06-27 13:01:57,test,test,2,115,57,9
+2025-06-27 13:02:01,test,test,3,7,56,0
+2025-06-27 13:02:15,test,test,4,125,59,9
+2025-06-27 13:02:24,test,test,5,60,51,0

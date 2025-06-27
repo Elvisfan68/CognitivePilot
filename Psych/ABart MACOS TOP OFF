@@ -1,0 +1,786 @@
+from psychopy import visual, core, event, data, gui, monitors
+import random
+import numpy as np
+import os
+from datetime import datetime
+import csv
+import pygame
+
+class BART:
+    def __init__(self):
+        pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=1024)
+        # Get participant info
+        self.get_participant_info()
+        
+        # macOS-specific display setup
+        self.setup_display_for_macos()
+        
+        # Default zoom level for macOS
+        self.default_zoom = 0.7  # Smaller default for macOS
+        
+        self.win.mouseVisible = True
+        self.calculate_text_scaling()
+
+        # Automatic BART parameters
+        self.array_size = 128
+        self.points_per_pump = 0.01  # 1 cent per pump
+        self.total_trials = 30
+        
+        # Generate break points for 30 trials with average of 64
+        self.break_points = self.generate_break_points()
+        
+        # Slider control variables
+        self.selected_pumps = 1
+        self.slider_dragging = False
+        
+        # Pumping animation variables
+        self.is_pumping = False
+        self.pumps_to_simulate = 0
+        self.pumps_simulated = 0
+        self.pump_timer = 0
+        self.pump_interval = 0.1  # Time between simulated pumps
+        self.in_topoff_mode = False  # Track if we're in top-off mode
+        
+        # Initialize display elements
+        self.setup_display()
+        
+        # Apply default zoom
+        self.set_zoom_level(self.default_zoom)
+        
+        # Data storage
+        self.trial_data = []
+        self.total_earned = 0.0
+        self.last_balloon_earned = 0.0
+        self.temporary_bank = 0.0
+        
+        # Current trial variables
+        self.current_trial = 0
+        self.current_pumps = 0
+        self.current_balloon_size = 50
+        self.balloon_exploded = False
+        
+        # Track pump sessions within a trial
+        self.pump_sessions = []  # List of individual pump sessions
+        self.session_number = 0  # Current session number within trial
+        self.has_topped_off = False  # Track if user has already topped off
+
+        # Tracking variables for proper top-off logging
+        self.intended_pumps_total = 0  # Track total intended pumps (initial + topoff)
+        self.initial_pumps_selected = 0  # Track first session selection
+        self.topoff_pumps_selected = 0  # Track topoff session selection
+        self.current_session_is_topoff = False  # Track if current session is top-off
+        
+        # Trial sequence - 30 balloons total
+        self.trial_sequence = self.create_trial_sequence()
+
+        try:
+            self.pump_sound = pygame.mixer.Sound("./Sound Effects/pump.mp3")
+            self.pop_sound = pygame.mixer.Sound("./Sound Effects/pop.mp3") 
+            self.collect_sound = pygame.mixer.Sound("./Sound Effects/collect.mp3")
+            print("Sounds loaded successfully")
+        except Exception as e:
+            print(f"Warning: Could not load sounds: {e}")
+            self.pump_sound = None
+            self.pop_sound = None
+            self.collect_sound = None
+
+    def setup_display_for_macos(self):
+        """Setup display with macOS-specific settings"""
+        import platform
+        
+        # Detect available monitors
+        available_monitors = monitors.getAllMonitors()
+        print(f"Available monitors: {available_monitors}")
+        
+        # Choose which screen to use
+        screen_num = 0
+        if len(available_monitors) > 1:
+            # If multiple monitors, ask user or use external display
+            try:
+                screen_choice = gui.Dlg(title="Display Selection")
+                screen_choice.addField('Use external display? (0=main, 1=external):', 0)
+                screen_choice.show()
+                if screen_choice.OK:
+                    screen_num = int(screen_choice.data[0])
+            except:
+                screen_num = 0
+        
+        # Get actual screen resolution
+        if platform.system() == "Darwin":  # macOS
+            try:
+                import subprocess
+                import re
+                
+                # Get display info using system_profiler
+                result = subprocess.run(['system_profiler', 'SPDisplaysDataType'], 
+                                      capture_output=True, text=True)
+                
+                # Parse resolution from output
+                resolution_matches = re.findall(r'Resolution: (\d+) x (\d+)', result.stdout)
+                if resolution_matches:
+                    if screen_num < len(resolution_matches):
+                        width, height = map(int, resolution_matches[screen_num])
+                        print(f"Detected resolution for screen {screen_num}: {width}x{height}")
+                    else:
+                        width, height = map(int, resolution_matches[0])
+                        print(f"Using primary display resolution: {width}x{height}")
+                else:
+                    # Fallback to common resolutions
+                    width, height = 1920, 1080
+                    print(f"Could not detect resolution, using fallback: {width}x{height}")
+            except:
+                # Final fallback
+                width, height = 1920, 1080
+                print(f"Error detecting resolution, using fallback: {width}x{height}")
+        else:
+            # Non-macOS systems
+            width, height = 1920, 1080
+        
+        # Create window with detected resolution
+        self.win = visual.Window(
+            size=[width, height],
+            fullscr=True,
+            screen=screen_num,
+            winType='pyglet',
+            allowGUI=False,
+            allowStencil=False,
+            monitor='testMonitor',
+            color=[0.8, 0.8, 0.8],
+            colorSpace='rgb',
+            blendMode='avg',
+            useFBO=True,
+            units='pix'
+        )
+        
+        print(f"Created window: {self.win.size[0]}x{self.win.size[1]} on screen {screen_num}")
+
+    # ADD ZOOM CONTROL METHODS
+    def set_zoom_level(self, zoom_level):
+        """
+        Zoom the entire screen in or out
+        
+        Args:
+            zoom_level (float): Zoom multiplier
+                               1.0 = normal view
+                               0.5 = zoomed out (everything appears smaller)
+                               2.0 = zoomed in (everything appears larger)
+        """
+        self.win.viewScale = zoom_level
+
+    def reset_zoom(self):
+        """Reset zoom to normal view"""
+        self.win.viewScale = 1.0
+        self.win.viewPos = [0, 0]
+
+    def get_current_zoom(self):
+        """Get the current zoom level"""
+        return getattr(self.win, 'viewScale', 1.0)
+
+    def get_participant_info(self):
+        """Get participant information"""
+        try:
+            dlg = gui.Dlg(title="Automatic BART - Participant Info")
+            dlg.addField('Participant ID:')
+            dlg.addField('Treatment:')
+            dlg.show()
+            
+            if dlg.OK:
+                self.participant_id = str(dlg.data[0]) if dlg.data[0] else "test_participant"
+                self.treatment = str(dlg.data[1]) if dlg.data[1] else "unknown"
+            else:
+                core.quit()
+        except:
+            # Fallback if GUI doesn't work
+            self.participant_id = "test_participant"
+            self.treatment = "unknown"
+
+    def play_sound(self, sound_name):
+        """Function to play pre-loaded sounds"""
+        try:
+            if sound_name == "pump.mp3" and self.pump_sound:
+                self.pump_sound.stop()
+                self.pump_sound.play()
+            elif sound_name == "pop.mp3" and self.pop_sound:
+                self.pop_sound.stop()
+                self.pop_sound.play()
+            elif sound_name == "collect.mp3" and self.collect_sound:
+                self.collect_sound.stop()
+                self.collect_sound.play()
+        except Exception as e:
+            print(f"Error playing sound {sound_name}: {e}")
+            pass
+
+    def calculate_balloon_color(self, pump_count):
+        """Calculate balloon color based on pump count (green -> yellow -> red)"""
+        # Normalize pump count to 0-1 range (assuming max useful range is ~100 pumps)
+        max_pumps = 100
+        ratio = min(pump_count / max_pumps, 1.0)
+        
+        if ratio <= 0.5:
+            # Green to Yellow (0 to 50 pumps)
+            # Green: (0, 1, 0) to Yellow: (1, 1, 0)
+            local_ratio = ratio * 2  # 0 to 1
+            r = local_ratio
+            g = 1.0
+            b = 0.0
+        else:
+            # Yellow to Red (50 to 100+ pumps)
+            # Yellow: (1, 1, 0) to Red: (1, 0, 0)
+            local_ratio = (ratio - 0.5) * 2  # 0 to 1
+            r = 1.0
+            g = 1.0 - local_ratio
+            b = 0.0
+        
+        return [r * 2 - 1, g * 2 - 1, b * 2 - 1]  # Convert to PsychoPy range (-1 to 1)
+
+    def calculate_text_scaling(self):
+        """Calculate text sizes based on screen dimensions - macOS optimized"""
+        screen_width = self.win.size[0]
+        screen_height = self.win.size[1]
+        
+        # More conservative scaling for macOS
+        base_scale = 1.2  # Reduced from 1.5
+        scale_factor = (screen_height / 1080.0) * base_scale
+        
+        # Cap the scale factor for very high-res displays
+        scale_factor = min(scale_factor, 2.0)
+        
+        self.text_sizes = {
+            'large': int(30 * scale_factor),    # Reduced sizes
+            'medium': int(24 * scale_factor),
+            'normal': int(20 * scale_factor),
+            'small': int(16 * scale_factor),
+            'button': int(22 * scale_factor),
+            'huge': int(45 * scale_factor)
+        }
+        
+        print(f"Screen size: {screen_width}x{screen_height}")
+        print(f"Scale factor: {scale_factor:.2f}")
+        print(f"Text sizes: {self.text_sizes}")
+
+    def setup_display(self):
+        """Setup all display elements with macOS-optimized scaling"""
+        screen_width = self.win.size[0]
+        screen_height = self.win.size[1]
+        
+        # More conservative scaling for macOS
+        base_scale_factor = min(screen_height / 1080.0, screen_width / 1920.0)
+        scale_factor = base_scale_factor * 1.2  # Reduced from 1.5
+        
+        print(f"Display setup - Screen: {screen_width}x{screen_height}, Scale: {scale_factor:.2f}")
+        
+        # Button dimensions - smaller for macOS
+        pump_button_width = int(180 * scale_factor)
+        pump_button_height = int(60 * scale_factor)
+        collect_button_width = int(220 * scale_factor)
+        collect_button_height = int(60 * scale_factor)
+        
+        # Button positions - closer to center
+        pump_button_x = -screen_width // 4  # Moved closer to center
+        collect_button_x = screen_width // 4
+        button_y = -screen_height // 4  # Moved up
+        
+        # Slider position (above buttons) - closer
+        slider_y = button_y + int(150 * scale_factor)
+        slider_width = int(350 * scale_factor)  # Slightly smaller
+        slider_height = int(18 * scale_factor)
+        
+        # Balloon (higher position but not too high)
+        balloon_y = int(100 * scale_factor)
+        self.balloon = visual.Circle(
+            self.win,
+            radius=50,
+            pos=[0, balloon_y],
+            fillColor=[-1, 1, -1],  # Start green
+            lineColor=[-1, 0.4, -1],  # Dark green
+            lineWidth=2
+        )
+        
+        # Balloon preview outline (shows predicted size)
+        self.balloon_preview = visual.Circle(
+            self.win,
+            radius=50,
+            pos=[0, balloon_y],
+            fillColor=None,
+            lineColor=[-1, 1, -1],  # Start green
+            lineWidth=2,
+            opacity=0.5
+        )
+        
+        # Slider elements
+        self.slider_y = slider_y
+        self.slider_width = slider_width
+        self.slider_left = -slider_width // 2
+        self.slider_right = slider_width // 2
+        
+        # Slider track (background bar)
+        self.slider_track = visual.Rect(
+            self.win,
+            width=slider_width,
+            height=slider_height,
+            pos=[0, slider_y],
+            fillColor='lightgray',
+            lineColor='black',
+            lineWidth=2
+        )
+        
+        # Slider handle (draggable circle)
+        self.slider_handle = visual.Circle(
+            self.win,
+            radius=int(12 * scale_factor),  # Slightly smaller
+            pos=[self.slider_left, slider_y],
+            fillColor='red',
+            lineColor='darkred',
+            lineWidth=3
+        )
+        
+        # Pump count display (below slider)
+        self.pump_count_text = visual.TextStim(
+            self.win,
+            text='Pumps: 1',
+            pos=[0, slider_y - int(40 * scale_factor)],  # Closer
+            color='black',
+            height=self.text_sizes['medium'],
+            bold=True
+        )
+        
+        # Pump button (LEFT)
+        self.pump_button = visual.Rect(
+            self.win,
+            width=pump_button_width,
+            height=pump_button_height,
+            pos=[pump_button_x, button_y],
+            fillColor='red',
+            lineColor='darkred',
+            lineWidth=4
+        )
+        
+        self.pump_button_text = visual.TextStim(
+            self.win,
+            text='PUMP',
+            pos=[pump_button_x, button_y],
+            color='white',
+            height=self.text_sizes['button'],
+            bold=True
+        )
+        
+        # Collect button (RIGHT)
+        self.collect_button = visual.Rect(
+            self.win,
+            width=collect_button_width,
+            height=collect_button_height,
+            pos=[collect_button_x, button_y],
+            fillColor='green',
+            lineColor='darkgreen',
+            lineWidth=4
+        )
+        
+        self.collect_text = visual.TextStim(
+            self.win,
+            text='Collect $$$',
+            pos=[collect_button_x, button_y],
+            color='white',
+            height=self.text_sizes['button'],
+            bold=True
+        )
+        
+        # Store button info for click detection
+        self.pump_button_info = {
+            'x': pump_button_x, 'y': button_y,
+            'width': pump_button_width, 'height': pump_button_height
+        }
+        
+        self.collect_button_info = {
+            'x': collect_button_x, 'y': button_y,
+            'width': collect_button_width, 'height': collect_button_height
+        }
+        
+        # Status bar at top - closer to center
+        status_y = screen_height // 3.5  # Moved down slightly
+        self.total_earned_text = visual.TextStim(
+            self.win, text='Total Earned: $0.00',
+            pos=[-screen_width // 4, status_y],  # Moved closer to center
+            color='black',
+            height=self.text_sizes['medium'],
+            bold=True
+        )
+        
+        self.last_balloon_text = visual.TextStim(
+            self.win,
+            text='Last Balloon: $0.00',
+            pos=[screen_width // 4, status_y],  # Moved closer to center
+            color='black',
+            height=self.text_sizes['medium'],
+            bold=True
+        )
+        
+        self.trial_number_text = visual.TextStim(
+            self.win,
+            text='Balloon 1 of 30',
+            pos=[0, status_y],
+            color='black',
+            height=self.text_sizes['medium'],
+            bold=True
+        )
+        
+        # Instructions below buttons - better positioning
+        instruction_y = button_y - int(80 * scale_factor)  # Closer to buttons
+        min_instruction_y = -screen_height // 2 + int(40 * scale_factor)
+        instruction_y = max(instruction_y, min_instruction_y)
+        
+        self.instruction_text = visual.TextStim(
+            self.win,
+            text='',
+            pos=[0, instruction_y],
+            color='black',
+            height=self.text_sizes['small'],
+            wrapWidth=screen_width * 0.7,  # Slightly narrower
+            alignText='center'
+        )
+
+    # Modified run_trial_loop with better mouse handling for macOS
+    def run_trial_loop(self):
+        """Main trial loop with macOS-optimized mouse handling"""
+        mouse_pressed = False
+        
+        while self.current_trial < self.total_trials:
+            # Handle events
+            mouse = event.Mouse()
+            keys = event.getKeys(keyList=['escape', 'minus', 'equal', 'r'])
+            
+            # Handle keyboard input
+            if keys:
+                if 'escape' in keys:
+                    self.quit_experiment()
+                # Optional zoom controls
+                elif 'minus' in keys:
+                    current_zoom = self.get_current_zoom()
+                    self.set_zoom_level(current_zoom * 0.9)
+                elif 'equal' in keys:
+                    current_zoom = self.get_current_zoom()
+                    self.set_zoom_level(current_zoom * 1.1)
+                elif 'r' in keys:
+                    self.reset_zoom()
+            
+            # Handle mouse interactions with better error handling
+            try:
+                mouse_pos = mouse.getPos()
+                # Ensure mouse_pos is a tuple/list with 2 elements
+                if not hasattr(mouse_pos, '__len__') or len(mouse_pos) < 2:
+                    mouse_pos = [0, 0]
+                elif len(mouse_pos) != 2:
+                    mouse_pos = [mouse_pos[0], mouse_pos[1]]
+            except Exception as e:
+                print(f"Mouse position error: {e}")
+                mouse_pos = [0, 0]
+            
+            mouse_buttons = mouse.getPressed()
+            current_mouse_pressed = mouse_buttons[0]
+            
+            # Handle slider interaction
+            self.handle_slider_interaction(mouse_pos, current_mouse_pressed)
+            
+            # Handle mouse clicks (only on button press, not hold)
+            if current_mouse_pressed and not mouse_pressed:
+                self.handle_mouse_click(mouse_pos)
+            
+            mouse_pressed = current_mouse_pressed
+            
+            # Update pumping simulation
+            self.update_pump_simulation()
+            
+            # Draw everything
+            self.draw_balloon()
+            self.draw_ui()
+            self.win.flip()
+            
+            # Small delay to prevent excessive CPU usage
+            core.wait(0.01)
+
+    # Continue with all your existing methods (the rest of the code remains the same)
+    # I'll include the critical mouse handling methods with error checking:
+
+    def handle_slider_interaction(self, mouse_pos, mouse_pressed):
+        """Handle slider interaction with error checking"""
+        if self.is_pumping:
+            return
+        
+        try:
+            mouse_x, mouse_y = mouse_pos
+        except (TypeError, ValueError):
+            return
+            
+        # Rest of your existing slider code...
+        slider_hitbox_height = 60
+        if (self.slider_left - 20 <= mouse_x <= self.slider_right + 20 and
+            self.slider_y - slider_hitbox_height//2 <= mouse_y <= self.slider_y + slider_hitbox_height//2):
+            
+            if mouse_pressed and not self.slider_dragging:
+                self.slider_dragging = True
+                
+            if self.slider_dragging:
+                relative_x = max(0, min(self.slider_width, mouse_x - self.slider_left))
+                slider_ratio = relative_x / self.slider_width
+                
+                if self.in_topoff_mode:
+                    new_pumps = max(1, min(9, int(1 + slider_ratio * 8 + 0.5)))
+                else:
+                    new_pumps = max(1, min(128, int(1 + slider_ratio * 127 + 0.5)))
+                
+                if new_pumps != self.selected_pumps:
+                    self.selected_pumps = new_pumps
+                    self.update_slider_position()
+                    
+                    predicted_size = self.calculate_predicted_balloon_size()
+                    self.balloon_preview.radius = predicted_size
+                    
+                    if self.in_topoff_mode:
+                        predicted_pumps = self.current_pumps + self.selected_pumps
+                    else:
+                        predicted_pumps = self.selected_pumps
+                    
+                    preview_color = self.calculate_balloon_color(predicted_pumps)
+                    self.balloon_preview.lineColor = preview_color
+                    
+                    self.pump_count_text.text = f'Pumps: {self.selected_pumps}'
+        
+        if not mouse_pressed:
+            self.slider_dragging = False
+
+    def handle_mouse_click(self, pos):
+        """Handle mouse clicks with error checking"""
+        if self.is_pumping:
+            return
+        
+        try:
+            mouse_x, mouse_y = pos
+        except (TypeError, ValueError):
+            return
+            
+        # Check pump button
+        pump = self.pump_button_info
+        if (pump['x'] - pump['width']//2 < mouse_x < pump['x'] + pump['width']//2 and
+            pump['y'] - pump['height']//2 < mouse_y < pump['y'] + pump['height']//2):
+            print(f"Pump button clicked! Starting simulation with {self.selected_pumps} pumps")
+            self.start_pump_simulation()
+            return
+        
+        # Check collect button  
+        collect = self.collect_button_info
+        if (collect['x'] - collect['width']//2 < mouse_x < collect['x'] + collect['width']//2 and
+            collect['y'] - collect['height']//2 < mouse_y < collect['y'] + collect['height']//2):
+            print("Collect button clicked!")
+            self.collect_money()
+            return
+
+    def run_trial_loop(self):
+        """Main trial loop"""
+        mouse_pressed = False
+        
+        while self.current_trial < self.total_trials:
+            # Handle events
+            mouse = event.Mouse()
+            keys = event.getKeys(keyList=['escape'])
+            
+            # Handle keyboard input
+            if keys:
+                if 'escape' in keys:
+                    self.quit_experiment()
+            
+            # Handle mouse interactions
+            mouse_pos = mouse.getPos()
+            mouse_buttons = mouse.getPressed()
+            current_mouse_pressed = mouse_buttons[0]
+            
+            # Handle slider interaction
+            self.handle_slider_interaction(mouse_pos, current_mouse_pressed)
+            
+            # Handle mouse clicks (only on button press, not hold)
+            if current_mouse_pressed and not mouse_pressed:
+                self.handle_mouse_click(mouse_pos)
+            
+            mouse_pressed = current_mouse_pressed
+            
+            # Update pumping simulation
+            self.update_pump_simulation()
+            
+            # Draw everything
+            self.draw_balloon()
+            self.draw_ui()
+            self.win.flip()
+            
+            # Small delay to prevent excessive CPU usage
+            core.wait(0.01)
+
+    def end_experiment(self):
+        """End the experiment and show results"""
+        # Calculate statistics
+        all_pumps = [trial['total_pumps_final'] for trial in self.trial_data]
+        mean_total_pumps = np.mean(all_pumps) if all_pumps else 0
+        
+        # Block analysis
+        block1_pumps = [trial['total_pumps_final'] for trial in self.trial_data[0:10]]
+        block2_pumps = [trial['total_pumps_final'] for trial in self.trial_data[10:20]]
+        block3_pumps = [trial['total_pumps_final'] for trial in self.trial_data[20:30]]
+        
+        mean_block1 = np.mean(block1_pumps) if block1_pumps else 0
+        mean_block2 = np.mean(block2_pumps) if block2_pumps else 0
+        mean_block3 = np.mean(block3_pumps) if block3_pumps else 0
+        
+        # Explosion analysis
+        total_explosions = sum(1 for trial in self.trial_data if trial['exploded'])
+        
+        # Top-off usage analysis
+        topoff_usage = sum(1 for trial in self.trial_data if trial.get('used_topoff', False))
+        
+        # Show final results
+        results_text = f"""Experiment Complete!
+        
+    PRIMARY MEASURE:
+    Mean Total Pumps: {mean_total_pumps:.2f}
+    
+    BLOCK ANALYSIS:
+    Block 1 (1-10): {mean_block1:.2f} pumps
+    Block 2 (11-20): {mean_block2:.2f} pumps  
+    Block 3 (21-30): {mean_block3:.2f} pumps
+    
+    Total Earned: ${self.total_earned:.2f}
+    Total Explosions: {total_explosions}
+    Top-offs Used: {topoff_usage} balloons
+    
+    Thank you for participating!
+    
+    Press SPACE to exit."""
+        
+        # Create results display
+        results_display = visual.TextStim(
+            self.win,
+            text=results_text,
+            pos=[0, 0],
+            color='black',
+            height=self.text_sizes['large'],
+            wrapWidth=1200
+        )
+        
+        # Clear screen and show results
+        self.win.clearBuffer()
+        results_display.draw()
+        self.win.flip()
+        
+        # Wait for spacebar
+        event.waitKeys(keyList=['space'])
+        
+        # Save data
+        self.save_data()
+        
+        # Close
+        self.win.close()
+        core.quit()
+
+    def save_data(self):
+        """Save experimental data to single simplified CSV file"""
+        filename = f"BART_TopOff_data_{self.participant_id}_{self.treatment}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        # Create data directory if it doesn't exist
+        if not os.path.exists('Bart Data'):
+            os.makedirs('Bart Data')
+        
+        filepath = os.path.join('Bart Data', filename)
+        
+        # Create simplified data structure
+        simplified_data = []
+        
+        for trial in self.trial_data:
+            # Parse pump sessions to extract initial and topoff pumps
+            initial_pump = 0
+            top_off = 0
+            
+            print(f"\n=== Processing Trial {trial['trial']} ===")
+            print(f"used_topoff flag: {trial.get('used_topoff', False)}")
+            print(f"pump_sessions_detail: {trial.get('pump_sessions_detail', 'None')}")
+            
+            if 'pump_sessions_detail' in trial and trial['pump_sessions_detail'] != '[]':
+                try:
+                    import ast
+                    sessions = ast.literal_eval(trial['pump_sessions_detail'])
+                    
+                    print(f"Successfully parsed {len(sessions)} sessions:")
+                    for i, session in enumerate(sessions):
+                        session_topoff = session.get('was_topoff', False)
+                        session_pumps = session.get('pumps_selected_this_session', 0)
+                        print(f"  Session {i+1}: was_topoff={session_topoff}, pumps={session_pumps}")
+                        
+                        if session_topoff:
+                            top_off = session_pumps
+                            print(f"    -> Found TOP-OFF session with {top_off} pumps")
+                        else:
+                            initial_pump = session_pumps
+                            print(f"    -> Found INITIAL session with {initial_pump} pumps")
+                            
+                except Exception as e:
+                    print(f"ERROR parsing sessions: {e}")
+                    # Fallback: use total pumps as initial if can't parse sessions
+                    initial_pump = trial.get('total_pumps_final', 0)
+                    top_off = 0
+                    print(f"Using fallback: initial_pump={initial_pump}, top_off=0")
+            else:
+                # No sessions recorded, use total pumps as initial
+                initial_pump = trial.get('total_pumps_final', 0)
+                top_off = 0
+                print(f"No sessions found, using total_pumps_final={initial_pump}")
+            
+            # Validation check
+            if trial.get('used_topoff', False) and top_off == 0:
+                print(f"⚠️  WARNING: Trial {trial['trial']} has used_topoff=True but extracted top_off=0")
+            
+            row = {
+                'Timestamp': trial.get('timestamp', ''),
+                'ID': trial.get('participant_id', ''),
+                'Treatment': trial.get('treatment', ''),
+                'Trial': trial.get('trial', 0),
+                'Explosion Point': trial.get('explosion_point', 0),
+                'Initial Pump': initial_pump,
+                'Top Off': top_off
+            }
+            
+            print(f"Final CSV row: Initial={initial_pump}, TopOff={top_off}")
+            simplified_data.append(row)
+        
+        # Write simplified data
+        try:
+            with open(filepath, 'w', newline='') as csvfile:
+                if simplified_data:
+                    fieldnames = ['Timestamp', 'ID', 'Treatment', 'Trial', 'Explosion Point', 'Initial Pump', 'Top Off']
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(simplified_data)
+            
+            print(f"\n✅ Simplified data saved to: {filepath}")
+        except Exception as e:
+            print(f"❌ Error saving data: {e}")
+    
+    def quit_experiment(self):
+        """Quit the experiment early"""
+        if self.trial_data:  # Save if there's any data
+            self.save_data()
+        self.win.close()
+        core.quit()
+    
+    def run(self):
+        """Run the complete BART experiment"""
+        try:
+            self.show_instructions()
+            self.start_new_balloon()
+            self.run_trial_loop()
+        except Exception as e:
+            print(f"Error during experiment: {e}")
+            self.quit_experiment()
+
+# Main execution
+if __name__ == "__main__":
+    try:
+        bart = BART()
+        bart.run()
+    except Exception as e:
+        print(f"Error initializing BART: {e}")
+        core.quit()
